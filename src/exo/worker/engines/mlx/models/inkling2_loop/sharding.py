@@ -22,8 +22,8 @@ from .model import Model
 
 def pipeline_parallel(
     model: Model,
-    metadata: PipelineShardMetadata,
     group: mx.distributed.Group,
+    metadata: PipelineShardMetadata,
 ) -> Model:
     args = model.args
     if group.size() != 2:
