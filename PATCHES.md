@@ -103,6 +103,13 @@ The patch set has two halves (Will, 2026-11-22):
 - **Upstream-ability:** clean — a one-line environment override with unchanged default behavior; plausible upstream as a deployment knob for edge hardware.
 
 
+### P4 — runner stall window is configurable (EXO_RUNNER_STALL_TIMEOUT)
+
+- **What:** `RUNNER_STALL_TIMEOUT` (src/exo/worker/runner/supervisor.py) reads `EXO_RUNNER_STALL_TIMEOUT`, defaulting to the upstream 90 s.
+- **Why:** the supervisor kills a generating runner that reports no token for the stall window, on the stated assumption that a healthy runner reports a token every step. For a very slow model that assumption inverts: inkling2_loop at ~98 s/token (4 cores, thermally throttled) was killed mid-generation with `model_stalled` ("Runner made no progress for 90s while generating") while computing correctly. Slow-model deployments need a window sized to their step time.
+- **Upstream-ability:** clean — an environment override with unchanged default; the failure mode (killing healthy slow runners) is generic to any sufficiently slow model/hardware pairing.
+
+
 ## Findings from the first run (EE 11–21, 2026-11-22) — no code divergence yet
 
 The fleet deployment currently runs VANILLA upstream 0.3.70: clustering,

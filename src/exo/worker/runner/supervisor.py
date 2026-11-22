@@ -1,5 +1,6 @@
 import codecs
 import contextlib
+import os
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -81,7 +82,10 @@ DECODE_TIMEOUT_SECONDS = 5
 RUNNER_WATCH_INTERVAL = 5.0
 # A generating runner reports a token every step and progress every prefill chunk, so this
 # long without a word means it is stuck (its instance's runners can wait on each other forever)
-RUNNER_STALL_TIMEOUT = 90.0
+# The 90 s default assumes a step takes well under 90 s. A very slow model on
+# constrained hardware can take minutes per token while making perfectly good
+# progress, so the window is a deployment knob (P4); the default is unchanged.
+RUNNER_STALL_TIMEOUT = float(os.environ.get("EXO_RUNNER_STALL_TIMEOUT", "90"))
 # How long a runner may take to be gone once it is on its way out, before it is reported as a
 # process that can't be stopped. Stopping gives the runner RUNNER_SHUTDOWN_GRACE (3 s) to take up
 # its Shutdown, then AsyncProcess waits 3 s for it to exit, sends SIGTERM and waits 5 s, sends 9
