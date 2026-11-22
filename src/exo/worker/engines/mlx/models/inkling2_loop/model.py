@@ -560,6 +560,12 @@ class Model(nn.Module):
             blocks = [payload[i] for i in range(1, 1 + n_bank)]
             logits = self._postlude_output(cur, blocks)
             gathered = mx.distributed.all_gather(logits[None, :, :], group=group)
+            # Materialize before returning: a lazy collective left pending
+            # across the call boundary can pair with the wrong collective on
+            # the other rank (exo's pre-decode mx_barrier deadlocked on
+            # exactly this). PipelineLastLayer evals before send for the
+            # same reason.
+            mx.eval(gathered)
             result = gathered[group.size() - 1 : group.size()]
         else:
             cur, blocks = self._embed_prelude_loop(mx.array(tokens, dtype=mx.int32))
@@ -569,9 +575,15 @@ class Model(nn.Module):
                     [cur[None, :, :], mx.stack(blocks, axis=0)], axis=0
                 )  # [1 + n_bank, T, E]
                 mx.eval(payload)
-                mx.distributed.send(payload, 1, group=group)
+                sent = mx.distributed.send(payload, 1, group=group)
+                # Eval the send itself: an unevaluated send may never be
+                # driven by the lazy graph, leaving the peer's recv (and
+                # then every later collective) waiting forever — the
+                # two-process repro deadlocked on exactly this.
+                mx.eval(sent)
                 zeros = mx.zeros((1, t, args.vocab_size), dtype=mx.float32)
                 gathered = mx.distributed.all_gather(zeros, group=group)
+                mx.eval(gathered)  # see the note on the "last" branch
                 result = gathered[group.size() - 1 : group.size()]
             else:
                 result = self._postlude_output(cur, blocks)[None, :, :]
