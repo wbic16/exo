@@ -299,6 +299,12 @@ class Model(nn.Module):
                 out[k] = v
         return out
 
+    @property
+    def layers(self) -> list[InklingLayer]:
+        # exo's cache factory asserts model.layers before it will use
+        # make_cache (the mlx-lm convention: a property onto the inner model).
+        return self.model.layers
+
     def make_cache(self) -> list[InklingCache]:
         history = _History()
         return [InklingCache(history) for _ in range(self.args.num_hidden_layers)]
