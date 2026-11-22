@@ -29,8 +29,72 @@ The patch set has two halves (Will, 2026-11-22):
 
 ## New patches (2026-11-22, this program)
 
-(none yet — entries land here as the run produces them, one per file, with
-what was broken, what the patch does, and the hardware evidence.)
+### P1 — Local model cards: serve a complete local directory with no hub (F2 fix)
+- Files: `src/exo/download/download_utils.py` (+`build_local_model_card`),
+  `src/exo/shared/models/model_cards.py` (`ModelCard.load`).
+- What was broken: a model that exists only as a local directory (the fleet's
+  converted Inkling weights) could never get a ModelCard: `ModelCard.load`
+  fell back to `fetch_from_hf`, which requires the model_id to resolve on
+  Hugging Face. Without a card there is no placement, no instance, no serve —
+  even though the download layer already treats a complete local copy as
+  fully downloaded (`store.find_complete`, used by the worker's
+  DownloadModel handler and the download coordinator).
+- What the patch does: `ModelCard.load`, on a card-cache miss, now tries
+  `build_local_model_card` before the HF fetch. The builder returns None
+  unless `store.find_complete` finds a complete local copy; it then builds
+  the card from the directory itself — ConfigData parsed from its
+  config.json (layers, hidden size, KV heads, context length, tensor
+  support), storage size = the safetensors bytes on disk, and `model_type`
+  from config.json so the master can look up the model's family. The card
+  is saved to the custom-cards dir exactly like a fetched one. The HF path
+  is untouched and still runs whenever no complete local copy exists.
+- Upstream-ability: high — generic (any local-only model benefits), small,
+  no behavior change for hub models. Candidate for the upstream PR once the
+  stage-4 cluster verification is green.
+
+### P2 — inkling2_loop family: the fleet Inkling-2-Mini architecture (F3 fix)
+- Files: `src/exo/worker/engines/mlx/models/inkling2_loop/` (new:
+  `model.py`, `sharding.py`, `family.py`, `spec.py`),
+  `src/exo/worker/engines/mlx/models/registry.py` (+1 import, +1 FAMILIES
+  entry, appended last), `src/exo/worker/engines/mlx/models/spec_registry.py`
+  (+1 import, +1 FAMILY_SPECS entry, appended last).
+- What was missing: mlx-lm has no class for GGUF architecture
+  `inkling2_loop` (24 layers; loop core 6..17 x3 passes with message
+  controllers fed from the previous pass's attention-residual block bank;
+  hybrid SWA/full attention with relative-position bias, no RoPE; depthwise
+  short convs; 128-expert MoE top-8 with SiTU; final-logit softcap).
+  Upstream exo ships an `inkling` family, but for a different checkpoint
+  (model_type `inkling_mm_model`) whose model.py has no loop, no attn-res
+  bank and no message controllers — numerically wrong for this checkpoint,
+  so it is not reused.
+- What the patch does: a new family whose model.py is a faithful port of
+  the fleet llama.cpp graph, verified standalone before this integration
+  (stage 3 of the program: greedy agreement with the elven-path
+  llama-server to the first divergence, a near-tie argmax flip inside
+  representation noise; step-0 logits identical top-6 order). Execution is
+  a full-sequence recompute in float32 — the prompt cache is a shared
+  token-history object (InklingCache), so exo's prefill/trim/decode flow
+  works unchanged. Routed experts (~49 GB of the 52 GB checkpoint) are not
+  parameters: sanitize() drops them from the load set and the family's
+  post_load re-opens the checkpoint memory-mapped and pages experts in per
+  use, so placement math (card memory_size < storage_size) stays honest
+  and no rank materializes the other stage's weights.
+- Placement: the generic pipeline split cannot express this model (stages
+  exchange the residual stream PLUS the block bank, and the loop core must
+  stay on one rank), so the family registers a custom `pipeline_parallel`
+  hook: exactly 2 ranks, shards (0, 18) and (18, 24) only — anything else
+  raises a located error. Rank 0 sends stream+bank; rank 1 runs the
+  postlude + output; logits are all_gathered so every rank returns them
+  (the deepseek_v4 idiom). Instances are launched with explicit shard
+  assignments (POST /instance), since the proportional allocator cannot be
+  aimed at the 18/6 split.
+- Registration mechanism: the smallest honest one — the family's own
+  ModelClasses are picked up by exo's existing mlx-lm registry hook
+  (load_model(get_model_classes=...)) from config.json's model_type. No
+  loader shim, no mlx-lm patch.
+- Upstream-ability: the family is self-contained and additive; the registry
+  edits are appends. It serves one specific open checkpoint family; whether
+  upstream wants it is their call — the fork carries it either way.
 
 ## Findings from the first run (EE 11–21, 2026-11-22) — no code divergence yet
 

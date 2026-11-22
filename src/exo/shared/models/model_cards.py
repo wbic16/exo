@@ -5,7 +5,7 @@ from typing import Annotated, Any, cast
 import aiofiles
 import aiofiles.os as aios
 import tomlkit
-from anyio import Path, open_file
+from anyio import Path, open_file, to_thread
 from huggingface_hub import model_info
 from loguru import logger
 from pydantic import (
@@ -259,6 +259,16 @@ class ModelCard(FrozenModel):
             await card_cache.refresh()
         if (mc := card_cache.get(model_id)) is not None:
             return mc
+
+        # A complete local copy needs no hub: build the card from its
+        # config.json and the bytes on disk, and cache it like a fetched one.
+        from exo.download.download_utils import build_local_model_card
+
+        if (
+            local := await to_thread.run_sync(build_local_model_card, model_id)
+        ) is not None:
+            await local.save_to_custom_dir()
+            return local
 
         mc = await ModelCard.fetch_from_hf(model_id)
         await mc.save_to_custom_dir()

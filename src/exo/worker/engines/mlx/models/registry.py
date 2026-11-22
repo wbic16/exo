@@ -33,6 +33,7 @@ from exo.worker.engines.mlx.models.glm.family import FAMILY as GLM
 from exo.worker.engines.mlx.models.gpt_oss.family import FAMILY as GPT_OSS
 from exo.worker.engines.mlx.models.hy_v3.family import FAMILY as HY_V3
 from exo.worker.engines.mlx.models.inkling.family import FAMILY as INKLING
+from exo.worker.engines.mlx.models.inkling2_loop.family import FAMILY as INKLING2_LOOP
 from exo.worker.engines.mlx.models.kimi.family import FAMILY as KIMI
 from exo.worker.engines.mlx.models.laguna.family import FAMILY as LAGUNA
 from exo.worker.engines.mlx.models.llama.family import FAMILY as LLAMA
@@ -63,6 +64,7 @@ FAMILIES: tuple[ModelFamily, ...] = (
     INKLING,
     HY_V3,
     MUSE_SPARK,
+    INKLING2_LOOP,
 )
 assert tuple(family.spec for family in FAMILIES) == FAMILY_SPECS
 

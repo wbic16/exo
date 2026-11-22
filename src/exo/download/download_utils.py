@@ -1,19 +1,23 @@
 """Model-file helpers for the rest of exo: finding a model on disk, fetching a
 single file (model cards), and an HTTP session for other callers."""
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 import aiohttp
 from anyio import to_thread
+from pydantic import ValidationError
 
 from exo.download import store, transfer
 from exo.download.hub import Hub, NotFoundError, new_session, proxy_for
 from exo.download.store import Manifest
 from exo.download.transfer import DownloadSettings, Locks, Part, Progress
-from exo.shared.models.model_cards import ModelCard
+from exo.shared.models.model_cards import ConfigData, ModelCard, ModelTask
+from exo.shared.types.backends import Backend
 from exo.shared.types.common import ModelId
+from exo.shared.types.memory import Memory
 
 
 def resolve_existing_model(
@@ -30,6 +34,45 @@ def is_read_only_model_dir(model_dir: Path) -> bool:
 def build_model_path(model_id: ModelId) -> Path:
     found = store.find_complete(model_id)
     return found if found is not None else store.default_dir() / model_id.normalize()
+
+
+def build_local_model_card(model_id: ModelId) -> ModelCard | None:
+    """A ModelCard built from a complete local copy of the model, if one is
+    on disk: config.json supplies the architecture fields and the safetensors
+    files on disk supply the storage size. Lets exo place and serve a model
+    that exists only locally (never published to a hub) with no network
+    access. Returns None when there is no complete local copy, or its
+    config.json cannot be parsed, or it holds no safetensors."""
+    found = store.find_complete(model_id)
+    if found is None:
+        return None
+    try:
+        config = json.loads((found / "config.json").read_text())
+        config_data = ConfigData.model_validate(config)
+    except (OSError, ValueError, ValidationError):
+        return None
+    storage_bytes = sum(
+        p.stat().st_size for p in found.glob("*.safetensors") if p.is_file()
+    )
+    if storage_bytes == 0:
+        return None
+    return ModelCard(
+        model_id=ModelId(model_id),
+        storage_size=Memory.from_bytes(storage_bytes),
+        n_layers=config_data.layer_count,
+        hidden_size=config_data.hidden_size or 0,
+        supports_tensor=config_data.supports_tensor,
+        num_key_value_heads=config_data.num_key_value_heads,
+        context_length=config_data.max_position_embeddings,
+        tasks=[ModelTask.TextGeneration],
+        trust_remote_code=False,
+        is_custom=True,
+        vision=config_data.vision,
+        backends=list(
+            Backend
+        ),  # all backends, as in fetch_from_hf: placement gates decide
+        model_type=config.get("model_type"),
+    )
 
 
 async def resolve_model_dir(model_id: ModelId) -> Path:
