@@ -12,9 +12,12 @@ without materializing the other stage's weights.
 
 from __future__ import annotations
 
+from collections.abc import Generator
+
 import mlx.core as mx
 from mlx.utils import tree_map_with_path
 
+from exo.shared.types.worker.runner_response import ModelLoadingResponse
 from exo.shared.types.worker.shards import PipelineShardMetadata
 
 from .model import Model
@@ -24,7 +27,7 @@ def pipeline_parallel(
     model: Model,
     group: mx.distributed.Group,
     metadata: PipelineShardMetadata,
-) -> Model:
+) -> Generator[ModelLoadingResponse, None, Model]:
     args = model.args
     if group.size() != 2:
         raise ValueError(
@@ -62,4 +65,12 @@ def pipeline_parallel(
     model.update(tree_map_with_path(shrink, model.parameters()))
     model._pp_stage = stage
     model._pp_group = group
+
+    # Evaluate the stage's layers, yielding load progress like the generic
+    # split does (the PipelineParallel protocol is a generator).
+    layers = model.model.layers[metadata.start_layer : metadata.end_layer]
+    total = len(layers)
+    for i, layer in enumerate(layers):
+        mx.eval(layer)
+        yield ModelLoadingResponse(layers_loaded=i, total=total)
     return model
