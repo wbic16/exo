@@ -96,6 +96,13 @@ The patch set has two halves (Will, 2026-11-22):
   edits are appends. It serves one specific open checkpoint family; whether
   upstream wants it is their call — the fork carries it either way.
 
+### P3 — warmup length is configurable (EXO_WARMUP_MAX_TOKENS)
+
+- **What:** `warmup_inference` (src/exo/worker/engines/mlx/generator/generate.py) reads the warmup token count from `EXO_WARMUP_MAX_TOKENS`, defaulting to the upstream 50.
+- **Why:** warmup's job is to exercise prefill/decode/barrier once before the runner reports ready. For a very slow model on thermally constrained hardware, 50 full-power tokens can exceed the node's thermal envelope before readiness: observed on ni-knight (Ryzen 7 7840HS-class mini-PC) with the inkling2_loop family at ~75 s/token — Tctl hit 91 C sustained during warmup and the run had to be stopped under the project's ~85 C thermal rule. With the variable set to 5, warmup exercises every code path and completes inside the envelope.
+- **Upstream-ability:** clean — a one-line environment override with unchanged default behavior; plausible upstream as a deployment knob for edge hardware.
+
+
 ## Findings from the first run (EE 11–21, 2026-11-22) — no code divergence yet
 
 The fleet deployment currently runs VANILLA upstream 0.3.70: clustering,

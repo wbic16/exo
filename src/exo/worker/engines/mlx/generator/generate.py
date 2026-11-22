@@ -1,6 +1,7 @@
 import contextlib
 import functools
 import math
+import os
 import time
 import uuid
 from typing import Callable, Generator, cast, get_args
@@ -412,10 +413,18 @@ def warmup_inference(
         "Prompt to warm up the inference engine. Repeat this."
     )
 
+    # Warmup length is a deployment parameter (P3): the default stays 50,
+    # but on thermally constrained hardware running a very slow model,
+    # 50 full-power warmup tokens can exceed the node's thermal envelope
+    # before the runner ever becomes ready (observed: ni-knight Tctl
+    # 91 C sustained during a 50-token warmup at ~75 s/token). Warmup's
+    # job is to exercise prefill/decode/barrier once, not endurance.
+    warmup_max_tokens = int(os.environ.get("EXO_WARMUP_MAX_TOKENS", "50"))
+
     warmup_task_params = TextGenerationTaskParams(
         model=model_id,
         input=[InputMessage(role="user", content=content)],
-        max_output_tokens=50,
+        max_output_tokens=warmup_max_tokens,
         temperature=0.0,
     )
 
