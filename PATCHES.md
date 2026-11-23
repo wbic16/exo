@@ -110,6 +110,30 @@ The patch set has two halves (Will, 2026-11-22):
 - **Upstream-ability:** clean — an environment override with unchanged default; the failure mode (killing healthy slow runners) is generic to any sufficiently slow model/hardware pairing.
 
 
+### P5 — MoE experts applied from an affine-quantized resident copy (perf pass 1)
+
+- **What:** `Model._moe` (src/exo/worker/engines/mlx/models/inkling2_loop/model.py)
+  gains an expert-major path over affine-quantized experts: on first use of a
+  layer, `_ExpertStore.quantized()` builds 8-bit (group_size 64) quantized
+  stacks of that layer's gate_up/down expert tensors from the bf16 checkpoint
+  and caches them resident; the MoE then applies each distinct expert once per
+  call for all (token, slot) pairs routed to it via `mx.quantized_matmul`.
+  `EXO_INKLING_EXPERT_BITS=0` restores the legacy path (slot-major, bf16
+  experts paged from the memory-mapped checkpoint and widened to f32 per use)
+  exactly; the default is 8.
+- **Why:** the legacy path re-read and re-widened every routed expert once per
+  top-k slot — ~2.2 s per MoE call at T=28 on a Ryzen 7 255 (measured,
+  PERF-PASS-1.md), the dominant term in the family's ~0.013 tok/s decode.
+  Expert-major alone (identical math, output diff ~1e-7) measured 2.8x; the
+  quantized path measured ~114 ms per call (19x) with an MoE-output max diff
+  of 8.9e-3 against the bf16 path, inside the representation-noise class the
+  stage-3 gate already accepts — and it only pays with the G1b AVX-512
+  quantized_matmul kernel in the runner's MLX (stock MLX's scalar CPU
+  quantized_matmul eats the gain; PERF-PASS-1.md has the A/B table).
+- **Upstream-ability:** the change is contained in the fork-only family; the
+  generic lesson (do not re-widen paged experts per slot) is upstreamable
+  wherever an MoE pages experts, but the code as written serves this family.
+
 ## Findings from the first run (EE 11–21, 2026-11-22) — no code divergence yet
 
 The fleet deployment currently runs VANILLA upstream 0.3.70: clustering,

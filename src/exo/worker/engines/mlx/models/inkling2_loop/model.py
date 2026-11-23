@@ -23,6 +23,9 @@ Architecture notes (why this family cannot use exo's generic pipeline split):
 - Routed experts (48 tensors, ~49 GB of the 52 GB checkpoint) are NOT model
   parameters: they stay memory-mapped on disk and are paged in per use by
   the MoE, loaded by the family's post_load hook into an opaque store.
+  Since P5 the MoE applies them from an affine-quantized resident copy
+  built lazily per layer (EXO_INKLING_EXPERT_BITS, default 8; 0 restores
+  the paged bf16 path).
   sanitize() drops them from the load set so exo's missing-parameter check
   and its mx.eval(model.parameters()) never try to materialize them.
 """
@@ -30,6 +33,7 @@ Architecture notes (why this family cannot use exo's generic pipeline split):
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +42,12 @@ import mlx.nn as nn
 from mlx_lm.models.cache import KVCache
 
 _EXPERT_SUFFIXES = ("ffn_gate_up_exps.weight", "ffn_down_exps.weight")
+
+# P5: the MoE applies routed experts from an affine-quantized resident copy
+# (see _ExpertStore.quantized), built lazily per layer on first use.
+# EXO_INKLING_EXPERT_BITS=0 restores the legacy bf16 page-in path exactly.
+_EXPERT_BITS = int(os.environ.get("EXO_INKLING_EXPERT_BITS", "8"))
+_EXPERT_GROUP_SIZE = 64
 
 
 @dataclass
@@ -208,6 +218,39 @@ class _ExpertStore:
 
     def __init__(self) -> None:
         self.by_layer: dict[int, tuple[mx.array, mx.array]] = {}
+        self._quantized: dict[int, tuple[mx.array, ...]] = {}
+
+    def quantized(
+        self, il: int, gu_all: mx.array, dn_all: mx.array
+    ) -> tuple[mx.array, ...]:
+        """Affine-quantized expert stacks for layer il (P5), built once on
+        first use and cached. Returns (gu_q, gu_scales, gu_biases, dn_q,
+        dn_scales, dn_biases), each stacked over the expert axis. Only the
+        layers a rank actually runs are ever built."""
+        got = self._quantized.get(il)
+        if got is None:
+            parts: list[list[mx.array]] = [[], [], [], [], [], []]
+            for e in range(gu_all.shape[0]):
+                wq, s, b = mx.quantize(
+                    gu_all[e].astype(mx.float32),
+                    group_size=_EXPERT_GROUP_SIZE,
+                    bits=_EXPERT_BITS,
+                )
+                parts[0].append(wq)
+                parts[1].append(s)
+                parts[2].append(b)
+                wq, s, b = mx.quantize(
+                    dn_all[e].astype(mx.float32),
+                    group_size=_EXPERT_GROUP_SIZE,
+                    bits=_EXPERT_BITS,
+                )
+                parts[3].append(wq)
+                parts[4].append(s)
+                parts[5].append(b)
+            got = tuple(mx.stack(p) for p in parts)
+            mx.eval(got)
+            self._quantized[il] = got
+        return got
 
 
 class InklingLayer(nn.Module):
@@ -337,6 +380,32 @@ class Model(nn.Module):
         idx_np = idx.tolist()
         out = mx.zeros_like(x)
         gu_all, dn_all = self._experts.by_layer[il]  # bf16, memory-mapped
+        if _EXPERT_BITS > 0:
+            # P5: expert-major application over the quantized resident copy.
+            # Each distinct expert is matmul'd once per call for every
+            # (token, slot) pair that routed to it, instead of being paged
+            # in and widened to f32 once per slot (the legacy path below).
+            pairs: dict[int, list[tuple[int, int]]] = {}
+            for t, row in enumerate(idx_np):
+                for slot, e in enumerate(row):
+                    pairs.setdefault(e, []).append((t, slot))
+            guq, gus, gub, dnq, dns, dnb = self._experts.quantized(il, gu_all, dn_all)
+            for e, ts in pairs.items():
+                toks = [t for t, _ in ts]
+                slots = [s for _, s in ts]
+                xt = x[toks]  # [n, E]
+                h = mx.quantized_matmul(
+                    xt, guq[e], gus[e], gub[e],
+                    transpose=True, group_size=_EXPERT_GROUP_SIZE, bits=_EXPERT_BITS,
+                )
+                act = _situ(h[:, : args.expert_ffn_length], h[:, args.expert_ffn_length :], args.situ_beta, args.situ_lb)
+                o = mx.quantized_matmul(
+                    act, dnq[e], dns[e], dnb[e],
+                    transpose=True, group_size=_EXPERT_GROUP_SIZE, bits=_EXPERT_BITS,
+                )
+                o = o * wsel[toks, slots][:, None]
+                out = out.at[toks].add(o)
+            return out
         for slot in range(args.top_k):
             by_exp: dict[int, list[int]] = {}
             for t, e in enumerate(row[slot] for row in idx_np):
